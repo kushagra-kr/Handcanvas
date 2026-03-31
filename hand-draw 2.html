@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>✦ Hand Draw</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+    touch-action: none;
+  }
+
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  /* Mirror video feed */
+  #video {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.18;
+  }
+
+  /* Drawing canvas - glowing trails */
+  #drawCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Overlay canvas - hand skeleton */
+  #handCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  /* HUD */
+  #hud {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 18px 22px;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  #title {
+    font-size: 13px;
+    letter-spacing: 0.25em;
+    color: rgba(255,220,50,0.7);
+    text-transform: uppercase;
+  }
+
+  #status {
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: rgba(255,255,255,0.35);
+    text-align: right;
+    line-height: 1.7;
+  }
+
+  /* Controls */
+  #controls {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    z-index: 10;
+  }
+
+  .btn {
+    background: rgba(255,220,50,0.08);
+    border: 1px solid rgba(255,220,50,0.3);
+    color: rgba(255,220,50,0.85);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    padding: 10px 18px;
+    border-radius: 2px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .btn:active {
+    background: rgba(255,220,50,0.2);
+    border-color: rgba(255,220,50,0.7);
+    transform: scale(0.97);
+  }
+
+  /* Loading overlay */
+  #loader {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    gap: 20px;
+  }
+
+  #loader-title {
+    font-size: 15px;
+    letter-spacing: 0.35em;
+    color: rgba(255,220,50,0.9);
+    text-transform: uppercase;
+  }
+
+  #loader-sub {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: rgba(255,255,255,0.35);
+    text-align: center;
+    line-height: 1.9;
+    max-width: 280px;
+  }
+
+  .loader-ring {
+    width: 48px;
+    height: 48px;
+    border: 1px solid rgba(255,220,50,0.15);
+    border-top-color: rgba(255,220,50,0.85);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #finger-indicator {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: rgba(255,255,255,0.25);
+    z-index: 10;
+    text-align: center;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="drawCanvas"></canvas>
+  <canvas id="handCanvas"></canvas>
+</div>
+
+<div id="hud">
+  <div id="title">✦ Hand Draw</div>
+  <div id="status">
+    <span id="fpsDisplay">— fps</span><br>
+    <span id="handStatus">No hand detected</span>
+  </div>
+</div>
+
+<div id="finger-indicator">Raise index finger to draw · Raise all fingers to pause</div>
+
+<div id="controls">
+  <button class="btn" id="clearBtn">Clear</button>
+  <button class="btn" id="camBtn">Flip Camera</button>
+</div>
+
+<div id="loader">
+  <div class="loader-ring"></div>
+  <div id="loader-title">Hand Draw</div>
+  <div id="loader-sub">Loading hand tracking model...<br>Allow camera access when prompted.</div>
+</div>
+
+<!-- MediaPipe via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+const video      = document.getElementById('video');
+const drawCanvas = document.getElementById('drawCanvas');
+const handCanvas = document.getElementById('handCanvas');
+const dCtx       = drawCanvas.getContext('2d');
+const hCtx       = handCanvas.getContext('2d');
+const loader     = document.getElementById('loader');
+const loaderSub  = document.getElementById('loader-sub');
+const handStatus = document.getElementById('handStatus');
+const fpsDisplay = document.getElementById('fpsDisplay');
+
+let W, H;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  drawCanvas.width  = W; drawCanvas.height  = H;
+  handCanvas.width  = W; handCanvas.height  = H;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Drawing trail state ─────────────────────────────────────────────
+const trails = [];       // array of path objects {pts:[], opacity:1}
+let currentTrail = null;
+let isDrawing    = false;
+let facingMode   = 'user';
+
+// ── MediaPipe hand connections ──────────────────────────────────────
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],       // thumb
+  [0,5],[5,6],[6,7],[7,8],       // index
+  [5,9],[9,10],[10,11],[11,12],  // middle
+  [9,13],[13,14],[14,15],[15,16],// ring
+  [13,17],[17,18],[18,19],[19,20],// pinky
+  [0,17]                         // palm base
+];
+
+// Landmark indices
+const FINGERTIPS = [4,8,12,16,20];
+const JOINTS     = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20];
+
+// ── Coordinate helpers ──────────────────────────────────────────────
+function lx(lm) { return (1 - lm.x) * W; } // mirrored
+function ly(lm) { return lm.y * H; }
+
+// ── Finger-up detection ─────────────────────────────────────────────
+function fingerUp(lms, tip, pip) {
+  return lms[tip].y < lms[pip].y;
+}
+
+// ── Glow helpers ────────────────────────────────────────────────────
+function glowLine(ctx, x1,y1,x2,y2, color, width, blur) {
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = blur;
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = width;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  ctx.lineTo(x2,y2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function glowCircle(ctx, x, y, r, color, blur, fill=false) {
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = blur;
+  if (fill) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── Draw skeleton ───────────────────────────────────────────────────
+function drawHand(lms) {
+  hCtx.clearRect(0, 0, W, H);
+
+  // Connections — thin glowing cyan lines
+  for (const [a,b] of CONNECTIONS) {
+    const ax = lx(lms[a]), ay = ly(lms[a]);
+    const bx = lx(lms[b]), by = ly(lms[b]);
+    glowLine(hCtx, ax,ay, bx,by, 'rgba(80,220,255,0.55)', 1.5, 12);
+    glowLine(hCtx, ax,ay, bx,by, 'rgba(180,240,255,0.15)', 4, 25);
+  }
+
+  // All joints — small rings
+  for (const i of JOINTS) {
+    const x = lx(lms[i]), y = ly(lms[i]);
+    glowCircle(hCtx, x, y, 4,  'rgba(80,200,255,0.5)', 14);
+    glowCircle(hCtx, x, y, 1.5,'rgba(200,240,255,0.9)', 6, true);
+  }
+
+  // Fingertips — larger bright rings
+  for (const t of FINGERTIPS) {
+    const x = lx(lms[t]), y = ly(lms[t]);
+    glowCircle(hCtx, x, y, 8,  'rgba(120,220,255,0.6)', 20);
+    glowCircle(hCtx, x, y, 3,  'rgba(255,255,255,0.9)', 10, true);
+  }
+}
+
+// ── Fade old trails ─────────────────────────────────────────────────
+function fadeTrails() {
+  // Slightly darken the draw canvas each frame
+  dCtx.globalCompositeOperation = 'destination-out';
+  dCtx.fillStyle = 'rgba(0,0,0,0.018)';
+  dCtx.fillRect(0,0,W,H);
+  dCtx.globalCompositeOperation = 'source-over';
+}
+
+// ── Draw trails ─────────────────────────────────────────────────────
+function renderTrails() {
+  // Redraw only the latest segment of current trail
+  if (!currentTrail || currentTrail.pts.length < 2) return;
+  const pts = currentTrail.pts;
+  const n   = pts.length;
+  const p1  = pts[n-2];
+  const p2  = pts[n-1];
+
+  // Outer glow (fat, soft)
+  dCtx.save();
+  dCtx.shadowColor = '#ffdd00';
+  dCtx.shadowBlur  = 28;
+  dCtx.strokeStyle = 'rgba(255,210,0,0.25)';
+  dCtx.lineWidth   = 18;
+  dCtx.lineCap     = 'round';
+  dCtx.lineJoin    = 'round';
+  dCtx.beginPath();
+  dCtx.moveTo(p1.x, p1.y);
+  dCtx.lineTo(p2.x, p2.y);
+  dCtx.stroke();
+  dCtx.restore();
+
+  // Mid glow
+  dCtx.save();
+  dCtx.shadowColor = '#ffee44';
+  dCtx.shadowBlur  = 12;
+  dCtx.strokeStyle = 'rgba(255,230,30,0.65)';
+  dCtx.lineWidth   = 5;
+  dCtx.lineCap     = 'round';
+  dCtx.lineJoin    = 'round';
+  dCtx.beginPath();
+  dCtx.moveTo(p1.x, p1.y);
+  dCtx.lineTo(p2.x, p2.y);
+  dCtx.stroke();
+  dCtx.restore();
+
+  // Core bright line
+  dCtx.save();
+  dCtx.shadowColor = '#ffffff';
+  dCtx.shadowBlur  = 6;
+  dCtx.strokeStyle = 'rgba(255,255,200,0.95)';
+  dCtx.lineWidth   = 2;
+  dCtx.lineCap     = 'round';
+  dCtx.lineJoin    = 'round';
+  dCtx.beginPath();
+  dCtx.moveTo(p1.x, p1.y);
+  dCtx.lineTo(p2.x, p2.y);
+  dCtx.stroke();
+  dCtx.restore();
+}
+
+// ── FPS ─────────────────────────────────────────────────────────────
+let lastT = performance.now(), fps = 0, fpsCount = 0;
+function tickFPS() {
+  fpsCount++;
+  const now = performance.now();
+  if (now - lastT > 500) {
+    fps = Math.round(fpsCount / ((now - lastT) / 1000));
+    fpsCount = 0;
+    lastT = now;
+    fpsDisplay.textContent = fps + ' fps';
+  }
+}
+
+// ── MediaPipe results handler ────────────────────────────────────────
+function onResults(results) {
+  tickFPS();
+  fadeTrails();
+  hCtx.clearRect(0, 0, W, H);
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    handStatus.textContent = 'No hand detected';
+    isDrawing = false;
+    currentTrail = null;
+    return;
+  }
+
+  const lms = results.multiHandLandmarks[0];
+  drawHand(lms);
+
+  // Detect index finger up, others curled → draw mode
+  const indexUp  = fingerUp(lms, 8, 6);
+  const middleUp = fingerUp(lms, 12, 10);
+  const ringUp   = fingerUp(lms, 16, 14);
+  const pinkyUp  = fingerUp(lms, 20, 18);
+
+  // All 4 fingers up = erase/pause mode
+  if (indexUp && middleUp && ringUp && pinkyUp) {
+    handStatus.textContent = '✋ Pause mode';
+    isDrawing = false;
+    currentTrail = null;
+    return;
+  }
+
+  if (indexUp) {
+    handStatus.textContent = '☝️ Drawing';
+    const tx = lx(lms[8]);
+    const ty = ly(lms[8]);
+
+    if (!isDrawing) {
+      isDrawing = true;
+      currentTrail = { pts: [{ x: tx, y: ty }] };
+      trails.push(currentTrail);
+    } else {
+      const last = currentTrail.pts[currentTrail.pts.length - 1];
+      const dist = Math.hypot(tx - last.x, ty - last.y);
+      if (dist > 2) {
+        currentTrail.pts.push({ x: tx, y: ty });
+        renderTrails();
+      }
+    }
+  } else {
+    handStatus.textContent = '✋ Hand detected';
+    isDrawing = false;
+    currentTrail = null;
+  }
+}
+
+// ── Init MediaPipe Hands ────────────────────────────────────────────
+async function init() {
+  loaderSub.innerHTML = 'Initializing hand tracker...';
+
+  const hands = new Hands({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.6
+  });
+
+  hands.onResults(onResults);
+
+  loaderSub.innerHTML = 'Requesting camera access...';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode,
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    loaderSub.innerHTML = 'Starting detection...';
+
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await hands.send({ image: video });
+      },
+      width:  1280,
+      height: 720
+    });
+
+    camera.start();
+    loader.style.opacity = '0';
+    loader.style.transition = 'opacity 0.5s';
+    setTimeout(() => loader.style.display = 'none', 600);
+
+  } catch (err) {
+    loaderSub.innerHTML = `Camera error: ${err.message}<br><br>Please allow camera access<br>and refresh the page.`;
+    console.error(err);
+  }
+}
+
+// ── Controls ────────────────────────────────────────────────────────
+document.getElementById('clearBtn').addEventListener('click', () => {
+  dCtx.clearRect(0, 0, W, H);
+  trails.length = 0;
+  currentTrail  = null;
+  isDrawing     = false;
+});
+
+document.getElementById('camBtn').addEventListener('click', async () => {
+  facingMode = facingMode === 'user' ? 'environment' : 'user';
+  video.style.transform = facingMode === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  });
+
+  const oldStream = video.srcObject;
+  video.srcObject = stream;
+  if (oldStream) oldStream.getTracks().forEach(t => t.stop());
+});
+
+// ── Start ────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
